@@ -346,3 +346,162 @@ body{
   color: rgba(255,255,255,0.92);
   font-weight: 700;
 }
+
+/* --- Sort dropdown look --- */
+.sortSelect {
+  height: 44px;
+  min-width: 190px;
+  padding: 0 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.92);
+  outline: none;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.sortSelect:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.sortSelect:focus {
+  border-color: rgba(255, 60, 60, 0.65);
+  transform: translateY(-1px);
+}
+
+.sortSelect:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --- Filter chips row --- */
+.chips {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.chips button {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.chips button:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.chips button:active {
+  transform: translateY(0px);
+}
+
+/* Optional: make search row spacing feel premium */
+.searchRow {
+  gap: 12px;
+}
+
+/* Optional: reduce “plain” feeling on help text */
+.searchHelp {
+  margin-top: 10px;
+  opacity: 0.9;
+}
+.ex {
+  margin-left: 8px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.chipRow{
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.chip{
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.9);
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  transition: transform .15s ease, background .15s ease, border-color .15s ease;
+}
+
+.chip:hover{
+  transform: translateY(-1px);
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.18);
+}
+
+.chip:active{
+  transform: translateY(0px);
+}
+
+/* Clear chip highlight */
+.chipClear{
+  border-color: rgba(255, 60, 90, 0.35);
+  background: rgba(255, 60, 90, 0.10);
+}
+
+.chipClear:hover{
+  border-color: rgba(255, 60, 90, 0.55);
+  background: rgba(255, 60, 90, 0.14);
+}
+.chipRow{
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.chip{
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.9);
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  transition: transform .15s ease, background .15s ease, border-color .15s ease;
+}
+
+.chip:hover{
+  transform: translateY(-1px);
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.18);
+}
+
+.chip:active{
+  transform: translateY(0px);
+}
+
+/* Clear chip highlight */
+.chipClear{
+  border-color: rgba(255, 60, 90, 0.35);
+  background: rgba(255, 60, 90, 0.10);
+}
+
+.chipClear:hover{
+  border-color: rgba(255, 60, 90, 0.55);
+  background: rgba(255, 60, 90, 0.14);
+}

@@ -1,184 +1,599 @@
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
+# backend/main.py
+from __future__ import annotations
+import csv
+import io
+from fastapi.responses import StreamingResponse
 import json
 import os
 import re
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-app = FastAPI(title="TOC Movies Explorer API")
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 
+
+APP_TITLE = "TOC Movies API"
+MOVIES_FILE = os.getenv("MOVIES_FILE", "movies.json")
+
+app = FastAPI(title=APP_TITLE)
+
+# Allow your Next.js frontend (localhost:3000) to call FastAPI (localhost:8000)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-MOVIES_PATH = os.path.join(os.path.dirname(__file__), "movies.json")
+# -----------------------------
+# Load data (in-memory cache)
+# -----------------------------
+_MOVIES: List[Dict[str, Any]] = []
 
 
 def load_movies() -> List[Dict[str, Any]]:
-    if not os.path.exists(MOVIES_PATH):
-        return []
-    with open(MOVIES_PATH, "r", encoding="utf-8") as f:
+    global _MOVIES
+    if _MOVIES:
+        return _MOVIES
+
+    if not os.path.exists(MOVIES_FILE):
+        _MOVIES = []
+        return _MOVIES
+
+    with open(MOVIES_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return data if isinstance(data, list) else []
+
+    if not isinstance(data, list):
+        _MOVIES = []
+        return _MOVIES
+
+    _MOVIES = data
+    return _MOVIES
 
 
-MOVIES = load_movies()
-
-
-def parse_runtime_minutes(value: Any) -> Optional[int]:
-    if value is None:
+# -----------------------------
+# Money helpers
+# -----------------------------
+def parse_money_to_usd(text: Optional[str]) -> Optional[float]:
+    """
+    Extracts a best-effort USD number from box_office strings.
+    Supports:
+      "$407.7 million", "$1.2 billion", "US$ 3,500,000", "$10–12 million" (takes first)
+    Returns raw USD value (e.g., 407700000.0) or None.
+    """
+    if not text:
         return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    s = str(value).strip().lower()
-    m = re.search(r"(\d+)", s)
-    return int(m.group(1)) if m else None
 
-
-def parse_money_to_usd(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    s = str(value).strip().lower()
-    if not s:
-        return None
-
+    s = text.lower()
     s = s.replace(",", "")
-    s = s.replace("us$", "$")
+    s = s.replace("us$", "$").replace("usd", "$")
 
-    if re.fullmatch(r"\d+(\.\d+)?", s):
-        return float(s)
+    # Handle ranges like "10–12 million" -> take first number
+    s = re.sub(r"(\d)\s*[–-]\s*(\d)", r"\1", s)
 
-    m = re.search(r"(\d+(\.\d+)?)\s*(billion|bn|million|m)?", s)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(billion|bn|million|m)?", s)
     if not m:
         return None
 
     num = float(m.group(1))
-    unit = (m.group(3) or "").lower()
+    unit = (m.group(2) or "").strip()
 
     if unit in ("billion", "bn"):
         return num * 1_000_000_000
     if unit in ("million", "m"):
         return num * 1_000_000
+    # If it’s a plain number (often already USD), keep it
     return num
 
 
-def compare(op: str, left: float, right: float) -> bool:
-    if op == ">":
-        return left > right
-    if op == ">=":
-        return left >= right
-    if op == "<":
-        return left < right
-    if op == "<=":
-        return left <= right
-    return left == right
+def format_usd_as_millions(usd_value: Optional[float]) -> Optional[str]:
+    """
+    Always display in "$X.X million" (even if original was billion).
+    """
+    if usd_value is None:
+        return None
+    million = usd_value / 1_000_000
+    # Keep it clean: 2264 million, 407.7 million
+    if million >= 1000:
+        return f"${million:.0f} million"
+    return f"${million:.1f} million"
 
 
-def extract_filters(q: str) -> Tuple[Dict[str, Tuple[str, float]], str]:
+# -----------------------------
+# Query parsing (regex-based)
+# -----------------------------
+Token = Tuple[str, str]  # (field, value/op)
+
+
+def tokenize_query(q: str) -> List[str]:
+    """
+    Tokenize while keeping key:"quoted value" as ONE token.
+    Examples:
+      director:"James Cameron"
+      title:"The Hulk"
+    """
     if not q:
-        return {}, ""
-
-    text = q.strip()
-    filters: Dict[str, Tuple[str, float]] = {}
-
-    rt = re.search(
-        r"\bruntime\s*(>=|<=|>|<|=)\s*(\d{1,3})\b", text, flags=re.I)
-    if rt:
-        filters["runtime"] = (rt.group(1), float(int(rt.group(2))))
-        text = re.sub(
-            r"\bruntime\s*(>=|<=|>|<|=)\s*\d{1,3}\b", " ", text, flags=re.I)
-
-    bo = re.search(
-        r"\bboxoffice\s*(>=|<=|>|<|=)\s*([\d\.]+)\s*(billion|bn|million|m)?\b",
-        text,
-        flags=re.I,
-    )
-    if bo:
-        op = bo.group(1)
-        num = float(bo.group(2))
-        unit = (bo.group(3) or "").lower()
-        if unit in ("billion", "bn"):
-            money = num * 1_000_000_000
-        elif unit in ("million", "m"):
-            money = num * 1_000_000
-        else:
-            money = num
-        filters["box_office"] = (op, float(money))
-        text = re.sub(
-            r"\bboxoffice\s*(>=|<=|>|<|=)\s*[\d\.]+\s*(billion|bn|million|m)?\b",
-            " ",
-            text,
-            flags=re.I,
-        )
-
-    text = re.sub(r"\s+", " ", text).strip()
-    return filters, text
+        return []
+    return re.findall(r'\w+:"[^"]*"|"[^"]*"|\S+', q)
 
 
-def matches_text(movie: Dict[str, Any], qq: str) -> bool:
-    if not qq:
+def strip_quotes(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        return s[1:-1]
+    return s
+
+
+def parse_filters(q: str) -> Dict[str, Any]:
+    """
+    Supported patterns (examples):
+      title:Hulk
+      director:"James Cameron"
+      release:2003  (matches year prefix)
+      runtime>=120  runtime<=90  runtime=134
+      boxoffice>100M  boxoffice>=500M  boxoffice>1B
+    Also supports free-text tokens (fallback search).
+    """
+    tokens = tokenize_query(q)
+    out: Dict[str, Any] = {
+        "title": None,
+        "director": None,
+        "release": None,
+        "runtime": None,     # (op, minutes)
+        "boxoffice": None,   # (op, usd_value)
+        "free": [],          # list[str]
+    }
+
+    for t in tokens:
+        raw = strip_quotes(t)
+
+        # title:...
+        m = re.match(r"(?i)^title:(.+)$", raw)
+        if m:
+            out["title"] = strip_quotes(m.group(1).strip())
+            continue
+
+        m = re.match(r"(?i)^director:(.+)$", raw)
+        if m:
+            out["director"] = strip_quotes(m.group(1).strip())
+            continue
+
+        # release:...
+        m = re.match(r"(?i)^release:(.+)$", raw)
+        if m:
+            out["release"] = m.group(1).strip()
+            continue
+
+        # runtime operators
+        m = re.match(r"(?i)^runtime\s*(>=|<=|=|>|<)\s*(\d{1,3})$", raw)
+        if m:
+            out["runtime"] = (m.group(1), int(m.group(2)))
+            continue
+
+        # boxoffice operators (100M / 1B / 250m)
+        m = re.match(
+            r"(?i)^boxoffice\s*(>=|<=|=|>|<)\s*(\d+(?:\.\d+)?)([mb])$", raw)
+        if m:
+            op = m.group(1)
+            num = float(m.group(2))
+            unit = m.group(3).lower()
+            usd = num * (1_000_000_000 if unit == "b" else 1_000_000)
+            out["boxoffice"] = (op, usd)
+            continue
+
+        # free text
+        out["free"].append(raw)
+
+    return out
+
+
+def compare_num(op: str, a: float, b: float) -> bool:
+    if op == ">":
+        return a > b
+    if op == "<":
+        return a < b
+    if op == ">=":
+        return a >= b
+    if op == "<=":
+        return a <= b
+    if op == "=":
+        return a == b
+    return False
+
+
+def match_prefix_or_contains(field_value: str, query: str) -> bool:
+    """
+    If query is short (1–2 chars, no spaces) => prefix match (starts with).
+    Otherwise => contains match.
+    """
+    fv = (field_value or "").lower().strip()
+    q = (query or "").lower().strip()
+
+    if not q:
         return True
-    qq = qq.lower().strip()
-    hay = " ".join(
-        [
-            str(movie.get("title", "")),
-            str(movie.get("director", "")),
-            str(movie.get("release_date", "")),
-            str(movie.get("running_time", "")),
-            str(movie.get("country", "")),
-            str(movie.get("language", "")),
-            str(movie.get("budget", "")),
-            str(movie.get("box_office", "")),
-        ]
-    ).lower()
-    return qq in hay
+
+    short_simple = (len(q) <= 2 and " " not in q)
+
+    if short_simple:
+        return fv.startswith(q)
+    return q in fv
 
 
-def matches_filters(movie: Dict[str, Any], filters: Dict[str, Tuple[str, float]]) -> bool:
-    if "runtime" in filters:
+def match_movie(m: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+    title = (m.get("title") or "").lower()
+    director = (m.get("director") or "").lower()
+    release = (m.get("release_date") or "").lower()
+
+    # title filter (prefix for short input, else contains)
+    if filters.get("title"):
+        if not match_prefix_or_contains(m.get("title") or "", filters["title"]):
+            return False
+
+    # director filter (prefix for short input, else contains)
+    if filters.get("director"):
+        if not match_prefix_or_contains(m.get("director") or "", filters["director"]):
+            return False
+
+    # release filter (year or date prefix contains)
+    if filters.get("release"):
+        if filters["release"].lower() not in release:
+            return False
+
+    # runtime numeric filter
+    if filters.get("runtime"):
         op, val = filters["runtime"]
-        rt = parse_runtime_minutes(movie.get("running_time"))
-        if rt is None:
+        rt = m.get("running_time")
+        try:
+            rt_num = float(rt) if rt is not None else None
+        except Exception:
+            rt_num = None
+        if rt_num is None:
             return False
-        if not compare(op, float(rt), float(val)):
+        if not compare_num(op, rt_num, float(val)):
             return False
 
-    if "box_office" in filters:
-        op, val = filters["box_office"]
-        bo = parse_money_to_usd(movie.get("box_office"))
-        if bo is None:
+    # box office numeric filter (uses box_office_usd if exists, else parse from string)
+    if filters.get("boxoffice"):
+        op, val = filters["boxoffice"]
+        bo_usd = m.get("box_office_usd")
+        if bo_usd is None:
+            bo_usd = parse_money_to_usd(m.get("box_office"))
+        if bo_usd is None:
             return False
-        if not compare(op, float(bo), float(val)):
+        if not compare_num(op, float(bo_usd), float(val)):
             return False
+
+    # free text: must match any field (title/director/release/box_office)
+    free_tokens: List[str] = filters.get("free") or []
+    if free_tokens:
+        hay = " ".join(
+            [
+                (m.get("title") or ""),
+                (m.get("director") or ""),
+                (m.get("release_date") or ""),
+                (m.get("box_office") or ""),
+            ]
+        ).lower()
+        for tok in free_tokens:
+            if tok.lower() not in hay:
+                return False
 
     return True
 
 
+# -----------------------------
+# Sorting (IMPORTANT: sort BEFORE pagination)
+# -----------------------------
+def sort_key(movie: Dict[str, Any], sort: str):
+    t = movie.get("title") or ""
+    d = movie.get("director") or ""
+    r = movie.get("release_date") or ""
+    rt = movie.get("running_time")
+    try:
+        rt_num = float(rt) if rt is not None else -1.0
+    except Exception:
+        rt_num = -1.0
+
+    bo_usd = movie.get("box_office_usd")
+    if bo_usd is None:
+        bo_usd = parse_money_to_usd(movie.get("box_office"))
+    try:
+        bo_num = float(bo_usd) if bo_usd is not None else -1.0
+    except Exception:
+        bo_num = -1.0
+
+    if sort == "release_desc":
+        return r
+    if sort == "release_asc":
+        return r
+    if sort == "runtime_desc":
+        return rt_num
+    if sort == "runtime_asc":
+        return rt_num
+    if sort == "box_desc":
+        return bo_num
+    if sort == "box_asc":
+        return bo_num
+    if sort == "title_asc":
+        return t.lower()
+
+    # default
+    return t.lower()
+
+
+def apply_sort(movies: List[Dict[str, Any]], sort: str) -> List[Dict[str, Any]]:
+    sort = (sort or "").strip()
+
+    # Accept frontend sort keys too (NO frontend change needed)
+    aliases = {
+        "boxoffice_desc": "box_desc",
+        "boxoffice_asc": "box_asc",
+        "default": "",
+    }
+    sort = aliases.get(sort, sort)
+
+    if sort == "release_desc":
+        return sorted(movies, key=lambda x: sort_key(x, sort), reverse=True)
+    if sort == "release_asc":
+        return sorted(movies, key=lambda x: sort_key(x, sort), reverse=False)
+
+    if sort == "runtime_desc":
+        return sorted(movies, key=lambda x: sort_key(x, sort), reverse=True)
+    if sort == "runtime_asc":
+        return sorted(movies, key=lambda x: sort_key(x, sort), reverse=False)
+
+    if sort == "box_desc":
+        return sorted(movies, key=lambda x: sort_key(x, sort), reverse=True)
+    if sort == "box_asc":
+        return sorted(movies, key=lambda x: sort_key(x, sort), reverse=False)
+
+    if sort == "title_asc":
+        return sorted(movies, key=lambda x: sort_key(x, sort), reverse=False)
+
+    return movies
+
+
+# -----------------------------
+# API
+# -----------------------------
 @app.get("/health")
 def health():
-    return {"ok": True, "total_movies": len(MOVIES)}
+    return {"ok": True, "count": len(load_movies())}
 
 
 @app.get("/movies")
 def list_movies(
     page: int = Query(1, ge=1),
     limit: int = Query(15, ge=1, le=100),
-    q: str = Query("", max_length=200),
+    q: str = Query("", max_length=500),
+    sort: str = Query("default"),
 ):
-    filters, text_q = extract_filters(q or "")
+    movies = load_movies()
 
-    filtered = [
-        m for m in MOVIES
-        if matches_filters(m, filters) and matches_text(m, text_q)
-    ]
+    filters = parse_filters(q.strip())
+    filtered = [m for m in movies if match_movie(m, filters)]
+
+    # Sort across ALL filtered results (before pagination)
+    filtered = apply_sort(filtered, sort)
 
     total = len(filtered)
     start = (page - 1) * limit
     end = start + limit
-    items = filtered[start:end]
+    page_items = filtered[start:end]
 
-    return {"total": total, "items": items, "page": page, "limit": limit}
+    # Clean up box office display: always "$X.X million"
+    out_items: List[Dict[str, Any]] = []
+    for m in page_items:
+        mm = dict(m)
+
+        bo_usd = mm.get("box_office_usd")
+        if bo_usd is None:
+            bo_usd = parse_money_to_usd(mm.get("box_office"))
+
+        # force a clean display string (optional)
+        mm["box_office"] = format_usd_as_millions(bo_usd) or None
+
+        # keep numeric for sorting/filtering on frontend if you want
+        mm["box_office_usd"] = bo_usd
+
+        out_items.append(mm)
+
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "items": out_items,
+    }
+
+
+@app.get("/export.csv")
+def export_csv(
+    q: str = Query("", max_length=500),
+    sort: str = Query("default"),
+):
+    movies = load_movies()
+
+    filters = parse_filters(q.strip())
+    filtered = [m for m in movies if match_movie(m, filters)]
+    filtered = apply_sort(filtered, sort)
+
+    def iter_csv():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+
+        # Header row
+        writer.writerow(
+            [
+                "title",
+                "director",
+                "release_date",
+                "running_time_min",
+                "box_office_usd",
+                "box_office_display",
+                "country",
+                "language",
+                "url",
+            ]
+        )
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+
+        # Data rows
+        for m in filtered:
+            bo_usd = m.get("box_office_usd")
+            if bo_usd is None:
+                bo_usd = parse_money_to_usd(m.get("box_office"))
+
+            box_display = format_usd_as_millions(bo_usd) or ""
+
+            writer.writerow(
+                [
+                    m.get("title") or "",
+                    m.get("director") or "",
+                    m.get("release_date") or "",
+                    m.get("running_time") or "",
+                    bo_usd if bo_usd is not None else "",
+                    box_display,
+                    m.get("country") or "",
+                    m.get("language") or "",
+                    m.get("url") or "",
+                ]
+            )
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+
+    filename = "movies_export.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+
+    return StreamingResponse(iter_csv(), media_type="text/csv", headers=headers)
+
+
+def safe_float(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
+def get_year_from_release(release_date: Optional[str]) -> Optional[int]:
+    """
+    Extract year from strings like:
+      "2003-07-25" or "2003"
+    """
+    if not release_date:
+        return None
+    m = re.match(r"^\s*(\d{4})", str(release_date))
+    if not m:
+        return None
+    y = int(m.group(1))
+    return y if 1800 <= y <= 2100 else None
+
+
+@app.get("/stats")
+def stats():
+    """
+    Stats + data quality + charts for the homepage dashboard.
+    Uses all movies in movies.json (not filtered).
+    """
+    movies = load_movies()
+    total = len(movies)
+
+    def has_value(v: Any) -> bool:
+        return v is not None and str(v).strip() != ""
+
+    # -------------------------
+    # Data quality
+    # -------------------------
+    director_ok = 0
+    runtime_ok = 0
+    release_ok = 0
+    boxoffice_ok = 0
+
+    # count missing across these key fields (same ones you display)
+    key_fields = ["title", "director",
+                  "release_date", "running_time", "box_office"]
+    missing_fields_total = 0
+
+    for m in movies:
+        if has_value(m.get("director")):
+            director_ok += 1
+
+        if safe_float(m.get("running_time")) is not None:
+            runtime_ok += 1
+
+        if has_value(m.get("release_date")):
+            release_ok += 1
+
+        bo = m.get("box_office_usd")
+        if bo is None:
+            bo = parse_money_to_usd(m.get("box_office"))
+        if safe_float(bo) is not None:
+            boxoffice_ok += 1
+
+        for k in key_fields:
+            if not has_value(m.get(k)):
+                missing_fields_total += 1
+
+    def pct(x: int) -> float:
+        return round((x / total) * 100, 1) if total else 0.0
+
+    quality = {
+        "director_pct": pct(director_ok),
+        "runtime_pct": pct(runtime_ok),
+        "release_pct": pct(release_ok),
+        "boxoffice_pct": pct(boxoffice_ok),
+        "missing_fields_total": missing_fields_total,
+    }
+
+    # -------------------------
+    # Chart 1: Movies by decade
+    # -------------------------
+    decade_counts: Dict[int, int] = {}
+    for m in movies:
+        y = get_year_from_release(m.get("release_date"))
+        if y is None:
+            continue
+        decade = (y // 10) * 10
+        decade_counts[decade] = decade_counts.get(decade, 0) + 1
+
+    movies_by_decade = [
+        {"decade": f"{d}s", "count": decade_counts[d]}
+        for d in sorted(decade_counts.keys())
+    ]
+
+    # -------------------------
+    # Chart 2: Runtime distribution
+    # -------------------------
+    buckets = {"<90": 0, "90–119": 0, "120–149": 0, "150+": 0}
+    for m in movies:
+        rt = safe_float(m.get("running_time"))
+        if rt is None:
+            continue
+        if rt < 90:
+            buckets["<90"] += 1
+        elif rt < 120:
+            buckets["90–119"] += 1
+        elif rt < 150:
+            buckets["120–149"] += 1
+        else:
+            buckets["150+"] += 1
+
+    runtime_distribution = [{"bucket": k, "count": v}
+                            for k, v in buckets.items()]
+
+    return {
+        "total_movies": total,
+        "quality": quality,
+        "charts": {
+            "movies_by_decade": movies_by_decade,
+            "runtime_distribution": runtime_distribution,
+        },
+    }

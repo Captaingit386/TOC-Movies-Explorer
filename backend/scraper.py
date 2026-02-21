@@ -4,6 +4,7 @@ import json
 import re
 import time
 import html as ihtml
+from typing import Optional
 from collections import deque
 from urllib.parse import urljoin, urlparse, unquote
 
@@ -37,6 +38,25 @@ def clean_text(s: str) -> str:
     # collapse whitespace
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def parse_box_office_usd(text: str) -> Optional[float]:
+    if not text:
+        return None
+    s = text.lower().replace(",", "").replace("us$", "$").replace("usd", "$")
+
+    m = re.search(r"(\d+(\.\d+)?)\s*(billion|bn|million|m)?", s)
+    if not m:
+        return None
+
+    num = float(m.group(1))
+    unit = (m.group(3) or "").lower()
+
+    if unit in ("billion", "bn"):
+        return num * 1_000_000_000
+    if unit in ("million", "m"):
+        return num * 1_000_000
+    return num
 
 
 def extract_infobox_fields(page_html: str) -> dict:
@@ -156,17 +176,19 @@ def extract_movie(page_html: str, url: str) -> dict:
 
     budget = clean_text(fields.get("budget", "")) or None
     box_office = clean_text(fields.get("box office", "")) or None
+    box_office_usd = parse_box_office_usd(box_office or "")
 
     return {
         "title": title or unquote(url.split("/wiki/")[-1]).replace("_", " "),
         "url": url,
         "director": director,
         "release_date": release_date,
-        "running_time": runtime,  # integer minutes
+        "running_time": runtime,
         "country": country,
         "language": language,
         "budget": budget,
         "box_office": box_office,
+        "box_office_usd": box_office_usd,
         "_has_infobox": bool(fields),
         "_raw_fields": list(fields.keys())[:10],
     }
@@ -226,6 +248,9 @@ def crawl_urls(start_url: str, crawl_target: int, sleep_sec: float) -> list:
     movie_urls = []
     q = deque([start_url])
 
+    print(
+        f"[phase] CRAWL: start from {start_url} (target movie pages={crawl_target})", flush=True)
+
     while q and len(movie_urls) < crawl_target:
         url = q.popleft()
         if url in seen_pages:
@@ -248,6 +273,11 @@ def crawl_urls(start_url: str, crawl_target: int, sleep_sec: float) -> list:
             if looks_like_film_page(full) and full not in seen_movie_urls:
                 seen_movie_urls.add(full)
                 movie_urls.append(full)
+
+                if len(movie_urls) % 10 == 0 or len(movie_urls) == 1:
+                    print(
+                        f"[crawl] found {len(movie_urls)}/{crawl_target} movie pages", flush=True)
+
                 if len(movie_urls) >= crawl_target:
                     break
 
@@ -257,6 +287,8 @@ def crawl_urls(start_url: str, crawl_target: int, sleep_sec: float) -> list:
         if sleep_sec > 0:
             time.sleep(sleep_sec)
 
+    print(
+        f"[phase] CRAWL: done (movie pages={len(movie_urls)}, pages_visited={len(seen_pages)})", flush=True)
     return movie_urls
 
 
@@ -264,9 +296,22 @@ def build_dataset(start_url: str, target: int, crawl_target: int, sleep_sec: flo
     urls = crawl_urls(start_url, crawl_target, sleep_sec)
     movies = []
 
+    print(
+        f"[phase] EXTRACT: start (urls={len(urls)}, target_movies={target})", flush=True)
+
+    attempted = 0
+    skipped = 0
+
     for url in urls:
         if len(movies) >= target:
             break
+
+        attempted += 1
+
+        # show progress even if many pages are skipped
+        if attempted % 20 == 0 or attempted == 1:
+            print(
+                f"[extract] attempted {attempted}/{len(urls)} | saved {len(movies)}/{target} | skipped {skipped}", flush=True)
 
         try:
             page_html = fetch(url)
@@ -274,8 +319,10 @@ def build_dataset(start_url: str, target: int, crawl_target: int, sleep_sec: flo
 
             # HARD FILTER: must have infobox and at least one real field
             if not m.get("_has_infobox"):
+                skipped += 1
                 continue
             if not (m.get("director") or m.get("release_date") or m.get("running_time")):
+                skipped += 1
                 continue
 
             # cleanup internal debug keys
@@ -284,13 +331,43 @@ def build_dataset(start_url: str, target: int, crawl_target: int, sleep_sec: flo
 
             movies.append(m)
 
+            print(
+                f"[extract] saved {len(movies)}/{target} (last: {m.get('title')})", flush=True)
+
         except Exception:
+            skipped += 1
             continue
 
         if sleep_sec > 0:
             time.sleep(sleep_sec)
 
+    print(
+        f"[phase] EXTRACT: done (saved={len(movies)}, attempted={attempted}, skipped={skipped})", flush=True)
     return movies
+
+
+def quality_report(movies: list):
+    total = len(movies) if movies else 0
+    if total == 0:
+        print("=== DATA QUALITY ===")
+        print("No movies collected.")
+        return
+
+    def pct(x: int) -> float:
+        return round(100.0 * x / total, 1)
+
+    has_director = sum(1 for m in movies if m.get("director"))
+    has_release = sum(1 for m in movies if m.get("release_date"))
+    has_runtime = sum(1 for m in movies if m.get("running_time") is not None)
+    has_box = sum(1 for m in movies if m.get("box_office"))
+    has_box_usd = sum(1 for m in movies if m.get("box_office_usd") is not None)
+
+    print("=== DATA QUALITY ===")
+    print(f"director       : {has_director}/{total} ({pct(has_director)}%)")
+    print(f"release_date   : {has_release}/{total} ({pct(has_release)}%)")
+    print(f"running_time   : {has_runtime}/{total} ({pct(has_runtime)}%)")
+    print(f"box_office     : {has_box}/{total} ({pct(has_box)}%)")
+    print(f"box_office_usd : {has_box_usd}/{total} ({pct(has_box_usd)}%)")
 
 
 def main():
@@ -307,6 +384,8 @@ def main():
 
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(movies, f, ensure_ascii=False, indent=2)
+
+    quality_report(movies)
 
     print("==== DONE ====")
     print(f"Saved: {len(movies)} movies")

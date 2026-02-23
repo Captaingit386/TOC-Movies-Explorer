@@ -1,71 +1,34 @@
-# TOC Project — Movies Crawler + Regex Scraper + Web App
+# TOC Movies Explorer — Wikipedia Crawler + Regex Extraction + Web App
 
-## Topic
-Movies (Wikipedia)
+## Overview
+TOC Movies Explorer is a full-stack web application that crawls Wikipedia movie pages and extracts structured movie information using **Python regular expressions (`import re`)**. The extracted dataset (100+ movies) is served through a **FastAPI** backend and displayed in a modern **Next.js (TypeScript)** frontend with powerful search filters, sorting, a data-quality dashboard, and CSV export.
 
-## What this project does
-1. **Crawler** collects 100+ movie page URLs from a Wikipedia portal page (category/list), following pagination if needed.
-2. **Scraper** visits each movie page and uses **Python regex (`import re`)** to extract movie info.
-3. Saves results to `backend/movies.json` (100 movies by default).
-4. **Web app** displays the information (Next.js frontend + FastAPI backend).
+## Key Features
+- **Wikipedia crawler + scraper** to collect and extract movie data (100+ instances)
+- **Regex-based extraction** (7+ non-trivial patterns) for structured fields
+- **Advanced search syntax** (e.g., `title:b`, `director:"James Cameron"`, `runtime>=120`, `boxoffice>100M`)
+- **Sorting + pagination** for browsing results
+- **Dataset dashboard** with data-quality metrics and charts
+- **Export filtered results to CSV** for Excel/Google Sheets
+- **GitHub link visible on the homepage** (`frontend/app/page.tsx`)
 
-## Requirements satisfied
-- 100+ instances (default is 100 movies)
-- Uses `import re` and includes **7 non-trivial regex patterns** (show these in your presentation)
-- Displays data on a web application
-- Homepage includes a visible GitHub link (edit `frontend/app/page.jsx`)
+## Tech Stack
+- **Backend:** Python + FastAPI + `re` (regex)
+- **Frontend:** Next.js (React) + TypeScript
+- **Data:** `backend/movies.json`
 
 ---
 
-## Run locally
+## Run Locally
 
-### Backend
+### Backend (Terminal 1)
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Crawl + scrape (creates movies.json)
-python scraper.py --start_url "https://en.wikipedia.org/wiki/Category:2020s_action_films" --target 100 --sleep 1.0 --out movies.json
+# Optional: regenerate dataset (use your script flags)
+python scraper.py --help
 
-# Start API
-uvicorn main:app --reload --port 8000
-```
-
-Open: http://127.0.0.1:8000/docs
-
-### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Open: http://localhost:3000
-
----
-
-## Configure frontend API URL (optional)
-Create `frontend/.env.local`:
-```txt
-NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000
-```
-Restart `npm run dev`.
-
----
-
-## Notes for the 10-minute YouTube demo
-- Show the crawler + scraper running and saving 100 movies.
-- Show the regex patterns at the top of `backend/scraper.py`.
-- Show backend `/docs` and test `/movies`.
-- Show frontend homepage with GitHub link and the movie list.
-- Click into a movie detail page.
-
----
-
-## Deployment suggestion (simple)
-- Backend: Render (FastAPI/uvicorn)
-- Frontend: Vercel (Next.js)
-
-Make sure the deployed frontend points to the deployed backend URL via `NEXT_PUBLIC_API_BASE`.
+uvicorn main:app --reload --host 0.0.0.0 --port 8000

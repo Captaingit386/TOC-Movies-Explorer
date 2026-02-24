@@ -1,8 +1,8 @@
 # backend/main.py
 from __future__ import annotations
+
 import csv
 import io
-from fastapi.responses import StreamingResponse
 import json
 import os
 import re
@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-
+from fastapi.responses import StreamingResponse
 
 APP_TITLE = "TOC Movies API"
 MOVIES_FILE = os.getenv("MOVIES_FILE", "movies.json")
@@ -86,7 +86,6 @@ def parse_money_to_usd(text: Optional[str]) -> Optional[float]:
         return num * 1_000_000_000
     if unit in ("million", "m"):
         return num * 1_000_000
-    # If it’s a plain number (often already USD), keep it
     return num
 
 
@@ -97,7 +96,6 @@ def format_usd_as_millions(usd_value: Optional[float]) -> Optional[str]:
     if usd_value is None:
         return None
     million = usd_value / 1_000_000
-    # Keep it clean: 2264 million, 407.7 million
     if million >= 1000:
         return f"${million:.0f} million"
     return f"${million:.1f} million"
@@ -115,6 +113,7 @@ def tokenize_query(q: str) -> List[str]:
     Examples:
       director:"James Cameron"
       title:"The Hulk"
+      country:"United Kingdom"
     """
     if not q:
         return []
@@ -133,6 +132,8 @@ def parse_filters(q: str) -> Dict[str, Any]:
     Supported patterns (examples):
       title:Hulk
       director:"James Cameron"
+      country:"Japan"
+      language:"English"
       release:2003  (matches year prefix)
       runtime>=120  runtime<=90  runtime=134
       boxoffice>100M  boxoffice>=500M  boxoffice>1B
@@ -142,6 +143,8 @@ def parse_filters(q: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "title": None,
         "director": None,
+        "country": None,     # NEW
+        "language": None,    # NEW
         "release": None,
         "runtime": None,     # (op, minutes)
         "boxoffice": None,   # (op, usd_value)
@@ -151,7 +154,6 @@ def parse_filters(q: str) -> Dict[str, Any]:
     for t in tokens:
         raw = strip_quotes(t)
 
-        # title:...
         m = re.match(r"(?i)^title:(.+)$", raw)
         if m:
             out["title"] = strip_quotes(m.group(1).strip())
@@ -162,19 +164,28 @@ def parse_filters(q: str) -> Dict[str, Any]:
             out["director"] = strip_quotes(m.group(1).strip())
             continue
 
-        # release:...
+        # NEW: country:...
+        m = re.match(r"(?i)^country:(.+)$", raw)
+        if m:
+            out["country"] = strip_quotes(m.group(1).strip())
+            continue
+
+        # NEW: language:...
+        m = re.match(r"(?i)^language:(.+)$", raw)
+        if m:
+            out["language"] = strip_quotes(m.group(1).strip())
+            continue
+
         m = re.match(r"(?i)^release:(.+)$", raw)
         if m:
             out["release"] = m.group(1).strip()
             continue
 
-        # runtime operators
         m = re.match(r"(?i)^runtime\s*(>=|<=|=|>|<)\s*(\d{1,3})$", raw)
         if m:
             out["runtime"] = (m.group(1), int(m.group(2)))
             continue
 
-        # boxoffice operators (100M / 1B / 250m)
         m = re.match(
             r"(?i)^boxoffice\s*(>=|<=|=|>|<)\s*(\d+(?:\.\d+)?)([mb])$", raw)
         if m:
@@ -185,7 +196,6 @@ def parse_filters(q: str) -> Dict[str, Any]:
             out["boxoffice"] = (op, usd)
             continue
 
-        # free text
         out["free"].append(raw)
 
     return out
@@ -224,26 +234,34 @@ def match_prefix_or_contains(field_value: str, query: str) -> bool:
 
 
 def match_movie(m: Dict[str, Any], filters: Dict[str, Any]) -> bool:
-    title = (m.get("title") or "").lower()
-    director = (m.get("director") or "").lower()
     release = (m.get("release_date") or "").lower()
 
-    # title filter (prefix for short input, else contains)
+    # title
     if filters.get("title"):
         if not match_prefix_or_contains(m.get("title") or "", filters["title"]):
             return False
 
-    # director filter (prefix for short input, else contains)
+    # director
     if filters.get("director"):
         if not match_prefix_or_contains(m.get("director") or "", filters["director"]):
             return False
 
-    # release filter (year or date prefix contains)
+    # NEW: country
+    if filters.get("country"):
+        if not match_prefix_or_contains(m.get("country") or "", filters["country"]):
+            return False
+
+    # NEW: language
+    if filters.get("language"):
+        if not match_prefix_or_contains(m.get("language") or "", filters["language"]):
+            return False
+
+    # release (year or date prefix contains)
     if filters.get("release"):
         if filters["release"].lower() not in release:
             return False
 
-    # runtime numeric filter
+    # runtime
     if filters.get("runtime"):
         op, val = filters["runtime"]
         rt = m.get("running_time")
@@ -256,7 +274,7 @@ def match_movie(m: Dict[str, Any], filters: Dict[str, Any]) -> bool:
         if not compare_num(op, rt_num, float(val)):
             return False
 
-    # box office numeric filter (uses box_office_usd if exists, else parse from string)
+    # boxoffice
     if filters.get("boxoffice"):
         op, val = filters["boxoffice"]
         bo_usd = m.get("box_office_usd")
@@ -267,13 +285,15 @@ def match_movie(m: Dict[str, Any], filters: Dict[str, Any]) -> bool:
         if not compare_num(op, float(bo_usd), float(val)):
             return False
 
-    # free text: must match any field (title/director/release/box_office)
+    # free text: must match all tokens somewhere in the haystack
     free_tokens: List[str] = filters.get("free") or []
     if free_tokens:
         hay = " ".join(
             [
                 (m.get("title") or ""),
                 (m.get("director") or ""),
+                (m.get("country") or ""),    # NEW
+                (m.get("language") or ""),   # NEW
                 (m.get("release_date") or ""),
                 (m.get("box_office") or ""),
             ]
@@ -290,7 +310,6 @@ def match_movie(m: Dict[str, Any], filters: Dict[str, Any]) -> bool:
 # -----------------------------
 def sort_key(movie: Dict[str, Any], sort: str):
     t = movie.get("title") or ""
-    d = movie.get("director") or ""
     r = movie.get("release_date") or ""
     rt = movie.get("running_time")
     try:
@@ -321,14 +340,12 @@ def sort_key(movie: Dict[str, Any], sort: str):
     if sort == "title_asc":
         return t.lower()
 
-    # default
     return t.lower()
 
 
 def apply_sort(movies: List[Dict[str, Any]], sort: str) -> List[Dict[str, Any]]:
     sort = (sort or "").strip()
 
-    # Accept frontend sort keys too (NO frontend change needed)
     aliases = {
         "boxoffice_desc": "box_desc",
         "boxoffice_asc": "box_asc",
@@ -394,10 +411,7 @@ def list_movies(
         if bo_usd is None:
             bo_usd = parse_money_to_usd(mm.get("box_office"))
 
-        # force a clean display string (optional)
         mm["box_office"] = format_usd_as_millions(bo_usd) or None
-
-        # keep numeric for sorting/filtering on frontend if you want
         mm["box_office_usd"] = bo_usd
 
         out_items.append(mm)
@@ -425,7 +439,6 @@ def export_csv(
         buf = io.StringIO()
         writer = csv.writer(buf)
 
-        # Header row
         writer.writerow(
             [
                 "title",
@@ -443,7 +456,6 @@ def export_csv(
         buf.seek(0)
         buf.truncate(0)
 
-        # Data rows
         for m in filtered:
             bo_usd = m.get("box_office_usd")
             if bo_usd is None:
@@ -484,10 +496,6 @@ def safe_float(x: Any) -> Optional[float]:
 
 
 def get_year_from_release(release_date: Optional[str]) -> Optional[int]:
-    """
-    Extract year from strings like:
-      "2003-07-25" or "2003"
-    """
     if not release_date:
         return None
     m = re.match(r"^\s*(\d{4})", str(release_date))
@@ -499,25 +507,47 @@ def get_year_from_release(release_date: Optional[str]) -> Optional[int]:
 
 @app.get("/stats")
 def stats():
-    """
-    Stats + data quality + charts for the homepage dashboard.
-    Uses all movies in movies.json (not filtered).
-    """
     movies = load_movies()
     total = len(movies)
+
+    country_counts: Dict[str, int] = {}
+
+    def normalize_country(raw: str) -> str:
+        s = (raw or "").strip()
+        if not s:
+            return "Unknown"
+        s_lower = s.lower()
+        if "united states" in s_lower:
+            return "United States"
+        if "united kingdom" in s_lower:
+            return "United Kingdom"
+
+        s = re.sub(r"\[\d+\]", "", s)
+        s = re.sub(r"<[^>]+>", "", s)
+        s = s.replace("=", " ").strip()
+        s = re.sub(r"\s+", " ", s).strip()
+        s = re.split(r",|;|/|\band\b|&", s, maxsplit=1, flags=re.I)[0].strip()
+        return s if s else "Unknown"
+
+    for m in movies:
+        c = normalize_country(m.get("country") or "")
+        country_counts[c] = country_counts.get(c, 0) + 1
+
+    top = sorted(country_counts.items(), key=lambda kv: kv[1], reverse=True)
+    TOP_N = 10
+    movies_by_country = [{"country": k, "count": v} for k, v in top[:TOP_N]]
+    other_sum = sum(v for _, v in top[TOP_N:])
+    if other_sum > 0:
+        movies_by_country.append({"country": "Other", "count": other_sum})
 
     def has_value(v: Any) -> bool:
         return v is not None and str(v).strip() != ""
 
-    # -------------------------
-    # Data quality
-    # -------------------------
     director_ok = 0
     runtime_ok = 0
     release_ok = 0
     boxoffice_ok = 0
 
-    # count missing across these key fields (same ones you display)
     key_fields = ["title", "director",
                   "release_date", "running_time", "box_office"]
     missing_fields_total = 0
@@ -546,16 +576,13 @@ def stats():
         return round((x / total) * 100, 1) if total else 0.0
 
     quality = {
-        "director_pct": pct(director_ok),
-        "runtime_pct": pct(runtime_ok),
-        "release_pct": pct(release_ok),
-        "boxoffice_pct": pct(boxoffice_ok),
+        "director": {"pct": pct(director_ok), "filled": director_ok, "total": total},
+        "runtime": {"pct": pct(runtime_ok), "filled": runtime_ok, "total": total},
+        "release": {"pct": pct(release_ok), "filled": release_ok, "total": total},
+        "boxoffice": {"pct": pct(boxoffice_ok), "filled": boxoffice_ok, "total": total},
         "missing_fields_total": missing_fields_total,
     }
 
-    # -------------------------
-    # Chart 1: Movies by decade
-    # -------------------------
     decade_counts: Dict[int, int] = {}
     for m in movies:
         y = get_year_from_release(m.get("release_date"))
@@ -564,14 +591,9 @@ def stats():
         decade = (y // 10) * 10
         decade_counts[decade] = decade_counts.get(decade, 0) + 1
 
-    movies_by_decade = [
-        {"decade": f"{d}s", "count": decade_counts[d]}
-        for d in sorted(decade_counts.keys())
-    ]
+    movies_by_decade = [{"decade": f"{d}s", "count": decade_counts[d]}
+                        for d in sorted(decade_counts.keys())]
 
-    # -------------------------
-    # Chart 2: Runtime distribution
-    # -------------------------
     buckets = {"<90": 0, "90–119": 0, "120–149": 0, "150+": 0}
     for m in movies:
         rt = safe_float(m.get("running_time"))
@@ -595,5 +617,6 @@ def stats():
         "charts": {
             "movies_by_decade": movies_by_decade,
             "runtime_distribution": runtime_distribution,
+            "movies_by_country": movies_by_country,
         },
     }

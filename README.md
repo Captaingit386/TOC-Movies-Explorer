@@ -67,3 +67,10 @@ pip install -r requirements.txt
 
 # Run API (uses backend/movies.json by default)
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+###Frontend (Terminal 2)
+cd frontend
+npm install
+npm run dev
+
+

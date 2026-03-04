@@ -69,7 +69,7 @@ pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-###Frontend (Terminal 2)
+### 2) Frontend(Terminal 2)
 ```bash
 cd frontend
 npm install
